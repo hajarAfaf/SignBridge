@@ -1,0 +1,2 @@
+terminal: pip install vosk sounddevice
+terminal pi: pip3 install vosk sounddevice websockets
