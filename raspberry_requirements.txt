@@ -1,0 +1,11 @@
+
+sudo apt update && sudo apt upgrade -y
+sudo apt install python3 python3-pip -y
+pip3 install vosk sounddevice websockets
+#pour micro usb: arecord -l
+wget https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip
+unzip vosk-model-small-fr-0.22.zip
+
+
+
+
