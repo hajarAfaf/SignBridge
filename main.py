@@ -6,7 +6,7 @@ import cv2
 from difflib import get_close_matches
 
 BASE_DIR   = Path(__file__).resolve().parent
-MODEL_DIR  = BASE_DIR / "model" / "vosk-model-small-fr-0.22"
+MODEL_DIR  =  Path("/home/pi/PycharmProjects/signbridge/vosk-model-fr-0.22")
 VIDEOS_DIR = BASE_DIR / "videosASL"
 EXTS = {".mp4", ".webm", ".avi", ".mov"}
 
