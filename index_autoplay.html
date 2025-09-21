@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>ASL Live</title>
+</head>
+<body>
+  <h1>ASL Live</h1>
+  <div id="status">En attente de reconnaissance...</div>
+  <video id="player" width="640" controls muted></video>
+  <div id="caption"></div>
+
+  <script>
+    const player = document.getElementById('player');
+    const status = document.getElementById('status');
+    const caption = document.getElementById('caption');
+
+    async function fetchSequence() {
+      let resp = await fetch("/current");
+      let obj = await resp.json();
+      if (obj.videos && obj.videos.length > 0) {
+        status.textContent = "Texte: " + obj.text;
+        // jouer la sequence
+        await playSequence(obj.videos);
+      } else {
+        status.textContent = "Pas (encore) de vidéo pour: " + obj.text;
+      }
+    }
+
+    async function playSequence(videos) {
+      for (let v of videos) {
+        player.src = "/static/" + v;  // adapte si ton dossier est différent
+        await player.play();
+        await new Promise(res => {
+          player.onended = res;
+        });
+      }
+    }
+
+    // toutes les secondes vérifier s’il y a une nouvelle séquence
+    setInterval(fetchSequence, 2000);
+  </script>
+</body>
+</html>
