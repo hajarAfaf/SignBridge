@@ -7,5 +7,23 @@ wget https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip
 unzip vosk-model-small-fr-0.22.zip
 
 
+#installer dependences
+# 1) Activer le venv utilisé par PyCharm
+source /home/pi/PycharmProjects/signbridge/.venv/bin/activate
+
+# 2) Mettre pip à jour
+python -m pip install --upgrade pip wheel
+
+# 3) Dépendances système minimales (son & affichage)
+sudo apt-get update
+sudo apt-get install -y libportaudio2 libsndfile1 libgl1 libgtk-3-0
+
+# 4) Paquets Python dans le venv
+pip install sounddevice
+pip install vosk
+pip install opencv-python   # (si pas d'UI, opencv-python-headless suffirait)
+
+
+
 
 
