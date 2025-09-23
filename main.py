@@ -1,340 +1,201 @@
-import json, queue, time, threading, unicodedata, os, asyncio
-from typing import Optional
+# SignBridge (compact & fonctionnel)
+import json, time, threading, unicodedata, queue
 from pathlib import Path
-import sounddevice as sd
+from functools import lru_cache
+
+import cv2, sounddevice as sd
 from vosk import Model, KaldiRecognizer
-import cv2
 from difflib import get_close_matches
+try:
+    from rapidfuzz import process as rf
+    HAVE_RF = True
+except Exception:
+    HAVE_RF = False
 
-# --- Diffusion web vers les appareils
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
+# --- Paths / data ---
+BASE = Path(__file__).resolve().parent
+MODEL = BASE / "model/vosk-model-small-fr-0.22"
+VIDEOS = BASE / "videosASL"
+exts = {".mp4", ".webm", ".avi", ".mov"}
+if not MODEL.exists():
+    raise FileNotFoundError(f"Modèle introuvable: {MODEL}")
+VIDEOS.mkdir(exist_ok=True)
 
-BASE_DIR   = Path(__file__).resolve().parent
-MODEL_DIR  =  Path("/home/pi/PycharmProjects/signbridge/vosk-model-fr-0.22")
-VIDEOS_DIR = BASE_DIR / "videosASL"
-WEB_DIR    = BASE_DIR / "web"
-EXTS = {".mp4", ".webm", ".avi", ".mov"}
-
-if not MODEL_DIR.exists():
-    raise FileNotFoundError(f"Modèle introuvable: {MODEL_DIR}")
-VIDEOS_DIR.mkdir(exist_ok=True)
-WEB_DIR.mkdir(exist_ok=True)
-# ---------- Utils ----------
-def strip_accents(s: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+# --- Normalisation + index ---
+TRANS = str.maketrans('', '', ' _-')
 
 def keyize(s: str) -> str:
-    s = strip_accents(s.lower().strip())
-    return s.replace(" ", "").replace("_", "").replace("-", "")
+    s = unicodedata.normalize('NFD', s.lower().strip())
+    return ''.join(c for c in s if unicodedata.category(c) != 'Mn').translate(TRANS)
 
 def build_index():
     idx = {}
-    for p in VIDEOS_DIR.rglob("*"):
-        if p.is_file() and p.suffix.lower() in EXTS:
+    for p in VIDEOS.rglob('*'):
+        if p.is_file() and p.suffix.lower() in exts:
             idx[keyize(p.stem)] = str(p)
     return idx
 
-INDEX = build_index()
-VOCAB = sorted(INDEX.keys())
-
+INDEX = build_index(); VOCAB = sorted(INDEX); VOCAB_T = tuple(VOCAB)
 if not INDEX:
-    print(f"⚠️ Aucune vidéo trouvée dans {VIDEOS_DIR}. Ajoute p.ex. {VIDEOS_DIR/'bonjour.mp4'}")
+    print(f"⚠️ Aucune vidéo dans {VIDEOS}")
 
-# ---------- Lecteur vidéo robuste ----------
+# --- Lecteur vidéo ---
 class LiveVideoPlayer:
-    """Joue toujours la dernière vidéo demandée; garde la fenêtre ouverte et la dernière frame affichée."""
-    def __init__(self, window_name="SignBridge"):
-        self.window = window_name
-        self._lock = threading.Lock()
-        self._next_path = None
-        self._switch = threading.Event()
-        self._stop = threading.Event()
-        self._t = threading.Thread(target=self._loop, daemon=True)
-        self._last_frame = None
-        self._t.start()
-
+    def __init__(self, name="SignBridge"):
+        self.name, self._last, self._next, self._stop = name, None, None, threading.Event()
+        self._switch, self._lock = threading.Event(), threading.Lock()
+        self._t = threading.Thread(target=self._loop, daemon=True); self._t.start()
     def play_now(self, path: str):
         with self._lock:
-            self._next_path = path
+            self._next = path
             self._switch.set()
-
-    def _ensure_window(self):
-        # recrée la fenêtre si elle est perdue
-        try:
-            cv2.getWindowProperty(self.window, 0)
-        except Exception:
-            pass
-        try:
-            cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
-        except Exception:
-            pass
-
     def _loop(self):
-        self._ensure_window()
+        try:
+            cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
+        except Exception:
+            pass
         cap = None
         while not self._stop.is_set():
+            self._switch.wait(0.01)
             if self._switch.is_set():
                 self._switch.clear()
                 with self._lock:
-                    path = self._next_path
+                    path = self._next
                 if cap is not None:
                     cap.release()
-                    cap = None
                 cap = cv2.VideoCapture(path)
                 if not cap.isOpened():
-                    print(f"⚠️ Impossible d'ouvrir la vidéo: {path}")
-                    cap = None
-
-            frame_shown = False
-            if cap is not None:
-                ok, frame = cap.read()
-                if not ok:
-                    # fin → rester sur la dernière frame
-                    cap.release()
+                    print(f"⚠️ Impossible d'ouvrir: {path}")
                     cap = None
                 else:
-                    self._last_frame = frame
-                    frame_shown = True
-
-            # Afficher soit la frame courante, soit la dernière frame connue
-            if frame_shown and self._last_frame is not None:
+                    try:
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+            if cap is not None:
+                ok, f = cap.read()
+                if ok:
+                    self._last = f
+                else:
+                    cap.release(); cap = None
+            if self._last is not None:
                 try:
-                    cv2.imshow(self.window, self._last_frame)
-                except Exception as e:
-                    # si la fenêtre a disparu, on la recrée
-                    self._ensure_window()
-            elif self._last_frame is not None:
-                # maintenir l'UI visible (image figée)
-                try:
-                    cv2.imshow(self.window, self._last_frame)
+                    cv2.imshow(self.name, self._last)
                 except Exception:
-                    self._ensure_window()
-
-            # UI réactive
+                    try:
+                        cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
+                    except Exception:
+                        pass
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self._stop.set()
-                break
-
-            if cap is None and not self._switch.is_set():
-                time.sleep(0.005)
-
         if cap is not None:
             cap.release()
         try:
             cv2.destroyAllWindows()
         except Exception:
             pass
-
     def close(self):
         self._stop.set()
-        self._t.join(timeout=1)
-
-app = FastAPI()
-app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
-app.mount("/static", StaticFiles(directory=str(VIDEOS_DIR)), name="static")
-app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="site")
-CLIENTS = set()
-WS_LOOP = None
-LATEST = {"ts": 0.0, "text": "", "videos": []}
-LATEST_LOCK = threading.Lock()
-@app.on_event("startup")
-async def _startup():
-    global WS_LOOP
-    WS_LOOP = asyncio.get_running_loop()
-
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-    await ws.accept()
-    CLIENTS.add(ws)
-    try:
-        while True:
-            # on ignore les messages entrants
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        CLIENTS.discard(ws)
-
-@app.get("/manifest")
-def manifest():
-    items = []
-    for k, p in INDEX.items():
-        rel = Path(p)
         try:
-            rel = rel.relative_to(VIDEOS_DIR)
+            self._t.join(0.5)
         except Exception:
-            rel = Path(p).name
-        url = "/videos/" + str(rel).replace(os.sep, "/")
-        items.append({"key": k, "url": url})
-    return {"items": items}
+            pass
 
-async def _ws_broadcast(msg: dict):
-    dead = []
-    for w in list(CLIENTS):
-        try:
-            await w.send_json(msg)
-        except Exception:
-            dead.append(w)
-    for w in dead:
-        CLIENTS.discard(w)
-
-def _to_url(path: str) -> str:
-    p = Path(path)
-    try:
-        rel = p.relative_to(VIDEOS_DIR)
-    except Exception:
-        rel = p.name
-    return "/videos/" + str(rel).replace(os.sep, "/")
-
-def notify_play(path: str, text: Optional[str] = None):
-    if not WS_LOOP:
-        return
-    url = _to_url(path)
-    asyncio.run_coroutine_threadsafe(_ws_broadcast({"type": "play", "url": url, "ts": time.time()}), WS_LOOP)
-    if text:
-        asyncio.run_coroutine_threadsafe(_ws_broadcast({"type": "text", "text": text}), WS_LOOP)
-
-def set_current(text: str, video_paths: list[str]) -> None:
-    """Publie la dernière séquence pour /current (on n’envoie que les noms de fichiers)."""
-    with LATEST_LOCK:
-        LATEST["ts"] = time.time()
-        LATEST["text"] = text
-        LATEST["videos"] = [Path(p).name for p in video_paths]
-
-@app.get("/current")
-def current():
-    # La page web lit ceci périodiquement
-    with LATEST_LOCK:
-        return dict(LATEST)
-
-def start_web_server():
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
-    server = uvicorn.Server(config)
-    server.run()
-
-# ---------- Vosk (latence basse + grammaire + fallback) ----------
-print("⏳ Chargement du modèle Vosk…")
-model = Model(str(MODEL_DIR))
-
+# --- STT ---
+print("⏳ Chargement Vosk…"); model = Model(str(MODEL))
 try:
-    default_sr = sd.query_devices(None, 'input')['default_samplerate']
-    SAMPLERATE = int(default_sr) if default_sr else 16000
+    sr = int(sd.query_devices(None, 'input')['default_samplerate'])
 except Exception:
-    SAMPLERATE = 16000
-
-# Grammaire contrainte (= nos mots) pour accélérer; sinon décodage libre
-grammar = json.dumps(VOCAB) if VOCAB else None
-rec = KaldiRecognizer(model, SAMPLERATE, grammar) if grammar else KaldiRecognizer(model, SAMPLERATE)
+    sr = 16000
+rec = KaldiRecognizer(model, sr, json.dumps(VOCAB)) if VOCAB else KaldiRecognizer(model, sr)
 try:
-    rec.SetWords(True)  # pas obligatoire, mais utile pour stabiliser certains modèles
+    rec.SetWords(True)
 except Exception:
     pass
 
-audio_q = queue.Queue()
+AUDIO_Q = queue.Queue(maxsize=8)
 
-# Anti-spam & stabilité
-last_token = ""
-last_time_for = {}
-COOLDOWN_SEC = 0.18          # ~5 déclenchements max/s pour un même mot
-FUZZY_CUTOFF = 0.82          # tolérance pour mapping approximatif (0..1)
-MIN_TOKEN_LEN = 2            # ignorer les tokens trop courts (bruit)
-
-def resolve_token(tok: str) -> str | None:
-    """Retourne le chemin vidéo pour un tok (exact ou fuzzy)."""
-    if tok in INDEX:
-        return INDEX[tok]
-    # fallback fuzzy s'il n'y a pas de match exact
-    matches = get_close_matches(tok, VOCAB, n=1, cutoff=FUZZY_CUTOFF)
-    if matches:
-        return INDEX[matches[0]]
-    return None
-
-def audio_callback(indata, frames, time_info, status):
+def audio_cb(indata, frames, time_info, status):
     if status:
-        print("⚠️", status)
-    audio_q.put(bytes(indata))
+        print('⚠️', status)
+    try:
+        AUDIO_Q.put_nowait(bytes(indata))
+    except queue.Full:
+        try:
+            AUDIO_Q.get_nowait()
+        except Exception:
+            pass
+        try:
+            AUDIO_Q.put_nowait(bytes(indata))
+        except Exception:
+            pass
 
-def stt_live(player: Optional[LiveVideoPlayer], device=None):
-    print(f"🎤 LIVE @ {SAMPLERATE} Hz — latence basse (blocksize 1536).")
-    phrase_buf = []
-    last_input_t = 0.0
+COOLDOWN_NS, FUZZY, MINLEN = int(0.18 * 1e9), 0.82, 2
+last_token, last_time = '', {}
 
-    def commit_phrase():
-        nonlocal phrase_buf
-        if not phrase_buf:
-            return
-        label = " ".join(phrase_buf)
-        seq = []
-        for t in phrase_buf:
-            p = resolve_token(t)
-            if p:
-                seq.append(p)
-        for p in seq:
-            notify_play(p, label)
-        if seq and player is not None:
-            player.play_now(seq[0])
-        phrase_buf = []
-    with sd.RawInputStream(samplerate=SAMPLERATE,
-                           blocksize=1536,               # compromis vitesse/stabilité
-                           dtype='int16',
-                           channels=1,
-                           callback=audio_callback,
-                           device=device,
-                           latency='low'):
+@lru_cache(maxsize=512)
+def resolve_exact(tok: str):
+    return INDEX.get(tok)
+
+@lru_cache(maxsize=512)
+def resolve_fuzzy(tok: str):
+    if HAVE_RF and VOCAB:
+        m = rf.extractOne(tok, VOCAB_T, score_cutoff=FUZZY * 100)
+        return INDEX.get(m[0]) if m else None
+    ms = get_close_matches(tok, VOCAB, n=1, cutoff=FUZZY)
+    return INDEX.get(ms[0]) if ms else None
+
+def resolve(tok: str):
+    return resolve_exact(tok) or resolve_fuzzy(tok)
+
+
+def stt_live(player: LiveVideoPlayer, device=None):
+    print(f"🎤 LIVE @{sr}Hz (block=1536) RF={'on' if HAVE_RF else 'off'}")
+    with sd.RawInputStream(samplerate=sr, blocksize=1536, dtype='int16', channels=1, callback=audio_cb, device=device, latency='low'):
+        last_parse = 0
         while True:
-            data = audio_q.get()
-            if rec.AcceptWaveform(data):
-                # On n’en a pas besoin pour déclencher rapidement,
-                # mais ça peut afficher le segment reconnu.
+            if rec.AcceptWaveform(AUDIO_Q.get()):
                 try:
-                    final_text = json.loads(rec.Result()).get("text", "")
-                    if final_text:
-                        print(f"\n✅ Final: {final_text}")
+                    t = json.loads(rec.Result()).get('text', '')
+                    if t:
+                        print("\n✅ Final:", t)
                 except Exception:
                     pass
             else:
+                now = time.monotonic_ns()
+                if now - last_parse < 25_000_000:  # 25ms
+                    continue
+                last_parse = now
                 try:
-                    partial = json.loads(rec.PartialResult()).get("partial", "")
+                    part = json.loads(rec.PartialResult()).get('partial', '')
                 except Exception:
-                    partial = ""
+                    part = ''
+                if not part:
+                    continue
+                tok_raw = part.strip().split()[-1].lower()
+                if len(tok_raw) < MINLEN:
+                    continue
+                tok = keyize(tok_raw)
+                global last_token
+                if not tok or tok == last_token:
+                    continue
+                if now - last_time.get(tok, 0) < COOLDOWN_NS:
+                    continue
+                last_time[tok] = now
+                p = resolve(tok)
+                if p:
+                    print(f"\r▶️ {tok_raw} ", end='', flush=True)
+                    player.play_now(p)
+                last_token = tok
 
-                if partial:
-                    tokens = partial.strip().lower().split()
-                    if not tokens:
-                        continue
-                    tok_raw = tokens[-1]
-                    if len(tok_raw) < MIN_TOKEN_LEN:
-                        continue
-                    tok = keyize(tok_raw)
 
-                    global last_token
-                    if tok and tok != last_token:
-                        now = time.time()
-                        if now - last_time_for.get(tok, 0) >= COOLDOWN_SEC:
-                            last_time_for[tok] = now
-                            path = resolve_token(tok)
-                            if path:
-                                print(f"\r▶️ {tok_raw} ", end="", flush=True)
-                                player.play_now(path)
-                                set_current(tok_raw, [path])
-                        last_token = tok
-
-# ---------- Main ----------
-if __name__ == "__main__":
-    if VOCAB:
-        print("🎬 Vocabulaire:", ", ".join(VOCAB))
-    else:
-        print("ℹ️ Vocabulaire vide (ajoute des vidéos).")
-    # démarrer le serveur web (pour téléphone/PC)
-    web_t = threading.Thread(target=start_web_server, daemon=True)
-    web_t.start()
-
-    player = LiveVideoPlayer("SignBridge")
+if __name__ == '__main__':
+    print('🎬 Vocabulaire:', ', '.join(VOCAB) if VOCAB else '(vide)')
+    player = LiveVideoPlayer()
     try:
         stt_live(player)
     except KeyboardInterrupt:
-        print("\n👋 Arrêt")
+        print('\n👋 Bye')
     finally:
         player.close()
+
