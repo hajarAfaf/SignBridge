@@ -7,38 +7,49 @@
 <body>
   <h1>ASL Live</h1>
   <div id="status">En attente de reconnaissance...</div>
-  <video id="player" width="640" controls muted></video>
+  <video id="player" width="640" controls muted playsinline webkit-playsinline preload="auto"></video>
   <div id="caption"></div>
 
   <script>
     const player = document.getElementById('player');
     const status = document.getElementById('status');
     const caption = document.getElementById('caption');
-
+    let lastTs = 0;
     async function fetchSequence() {
-      let resp = await fetch("/current");
-      let obj = await resp.json();
+     try {
+      const resp = await fetch("/current", {cache: "no-store"});
+      const obj = await resp.json();
+      if (!obj.ts || obj.ts <= lastTs) return;  // ← ne rejoue pas si pas de nouveauté
+      lastTs = obj.ts;
+
+      status.textContent = "Texte: " + (obj.text || "");
+      caption.textContent = obj.text || "";
       if (obj.videos && obj.videos.length > 0) {
-        status.textContent = "Texte: " + obj.text;
-        // jouer la sequence
         await playSequence(obj.videos);
-      } else {
-        status.textContent = "Pas (encore) de vidéo pour: " + obj.text;
+         }
+      } catch (e) {
+      // silencieux
       }
     }
 
-    async function playSequence(videos) {
-      for (let v of videos) {
-        player.src = "/static/" + v;  // adapte si ton dossier est différent
-        await player.play();
-        await new Promise(res => {
-          player.onended = res;
-        });
-      }
+  async function playSequence(videos) {
+    for (const v of videos) {
+      player.src = "/static/" + encodeURIComponent(v);
+      try {
+          await player.play();
+        } catch (err) {
+          // Si l'autoplay échoue, on peut afficher un statut ou proposer un clic utilisateur
+          status.textContent = "Appuyez sur ▶ pour démarrer la lecture.";
+          return;
+        }
+      await new Promise(res => player.onended = res);
     }
+  }
+}
 
     // toutes les secondes vérifier s’il y a une nouvelle séquence
     setInterval(fetchSequence, 2000);
   </script>
 </body>
 </html>
+
