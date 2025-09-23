@@ -1,19 +1,26 @@
-import json, queue, time, threading, unicodedata, os
+import json, queue, time, threading, unicodedata, os, asyncio
+from typing import Optional
 from pathlib import Path
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 import cv2
 from difflib import get_close_matches
 
+# --- Diffusion web vers les appareils
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+
 BASE_DIR   = Path(__file__).resolve().parent
 MODEL_DIR  =  Path("/home/pi/PycharmProjects/signbridge/vosk-model-fr-0.22")
 VIDEOS_DIR = BASE_DIR / "videosASL"
+WEB_DIR    = BASE_DIR / "web"
 EXTS = {".mp4", ".webm", ".avi", ".mov"}
 
 if not MODEL_DIR.exists():
     raise FileNotFoundError(f"Modèle introuvable: {MODEL_DIR}")
 VIDEOS_DIR.mkdir(exist_ok=True)
-
+WEB_DIR.mkdir(exist_ok=True)
 # ---------- Utils ----------
 def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
@@ -124,6 +131,73 @@ class LiveVideoPlayer:
         self._stop.set()
         self._t.join(timeout=1)
 
+app = FastAPI()
+app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
+app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="site")
+CLIENTS = set()
+WS_LOOP = None
+@app.on_event("startup")
+async def _startup():
+    global WS_LOOP
+    WS_LOOP = asyncio.get_running_loop()
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    CLIENTS.add(ws)
+    try:
+        while True:
+            # on ignore les messages entrants
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        CLIENTS.discard(ws)
+
+@app.get("/manifest")
+def manifest():
+    items = []
+    for k, p in INDEX.items():
+        rel = Path(p)
+        try:
+            rel = rel.relative_to(VIDEOS_DIR)
+        except Exception:
+            rel = Path(p).name
+        url = "/videos/" + str(rel).replace(os.sep, "/")
+        items.append({"key": k, "url": url})
+    return {"items": items}
+
+async def _ws_broadcast(msg: dict):
+    dead = []
+    for w in list(CLIENTS):
+        try:
+            await w.send_json(msg)
+        except Exception:
+            dead.append(w)
+    for w in dead:
+        CLIENTS.discard(w)
+
+def _to_url(path: str) -> str:
+    p = Path(path)
+    try:
+        rel = p.relative_to(VIDEOS_DIR)
+    except Exception:
+        rel = p.name
+    return "/videos/" + str(rel).replace(os.sep, "/")
+
+def notify_play(path: str, text: Optional[str] = None):
+    if not WS_LOOP:
+        return
+    url = _to_url(path)
+    asyncio.run_coroutine_threadsafe(_ws_broadcast({"type": "play", "url": url, "ts": time.time()}), WS_LOOP)
+    if text:
+        asyncio.run_coroutine_threadsafe(_ws_broadcast({"type": "text", "text": text}), WS_LOOP)
+
+def start_web_server():
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning")
+    server = uvicorn.Server(config)
+    server.run()
+
 # ---------- Vosk (latence basse + grammaire + fallback) ----------
 print("⏳ Chargement du modèle Vosk…")
 model = Model(str(MODEL_DIR))
@@ -166,8 +240,26 @@ def audio_callback(indata, frames, time_info, status):
         print("⚠️", status)
     audio_q.put(bytes(indata))
 
-def stt_live(player: LiveVideoPlayer, device=None):
+def stt_live(player: Optional[LiveVideoPlayer], device=None):
     print(f"🎤 LIVE @ {SAMPLERATE} Hz — latence basse (blocksize 1536).")
+    phrase_buf = []
+    last_input_t = 0.0
+
+    def commit_phrase():
+        nonlocal phrase_buf
+        if not phrase_buf:
+            return
+        label = " ".join(phrase_buf)
+        seq = []
+        for t in phrase_buf:
+            p = resolve_token(t)
+            if p:
+                seq.append(p)
+        for p in seq:
+            notify_play(p, label)
+        if seq and player is not None:
+            player.play_now(seq[0])
+        phrase_buf = []
     with sd.RawInputStream(samplerate=SAMPLERATE,
                            blocksize=1536,               # compromis vitesse/stabilité
                            dtype='int16',
