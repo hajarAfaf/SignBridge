@@ -1,3 +1,4 @@
+Sur Raspberry
 # 1) Activer SSH (si pas déjà fait) :
 sudo raspi-config  # Interface Options → SSH → Enable
 
@@ -11,3 +12,6 @@ sudo apt install -y openssh-server git python3-venv python3-pip build-essential
 #    - activer zram pour swap rapide (plugin recommandé sur Raspberry Pi OS)
 sudo apt install -y zram-tools
 # /etc/default/zramswap : laisser la config par défaut (souvent OK)
+
+
+Sur windows
