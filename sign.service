@@ -1,0 +1,35 @@
+# /etc/systemd/system/sign.service
+[Unit]
+Description=SignBridge-Serveur STT et WebSocket
+After=graphical.target sound.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+# pour l’accès micro / caméra / X
+SupplementaryGroups=audio,video,input
+WorkingDirectory=/home/pi/PycharmProjects/signbridge
+
+# 👉 si tu restes en Python système et Option A
+# ExecStart=/usr/bin/python3 -u main.py
+
+# 👉 si tu utilises un venv (Option B, recommandé)
+ExecStart=/home/pi/PycharmProjects/signbridge/.venv/bin/python -u main.py
+
+# si tu veux afficher la fenêtre OpenCV sur :0
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+# (souvent utile si PipeWire/PulseAudio est en mode utilisateur)
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+Restart=on-failure
+RestartSec=5
+
+# Journalisation lisible
+StandardOutput=append:/home/pi/signbridge.log
+StandardError=append:/home/pi/signbridge.log
+
+[Install]
+WantedBy=graphical.target
