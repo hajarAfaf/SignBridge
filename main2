@@ -1,0 +1,209 @@
+# SignBridge (compact & fonctionnel)
+import os
+import json, time, threading, unicodedata, queue
+from pathlib import Path
+from functools import lru_cache
+import cv2 
+import sounddevice as sd
+from vosk import Model, KaldiRecognizer
+from difflib import get_close_matches
+try:
+    from rapidfuzz import process as rf
+    HAVE_RF = True
+except Exception:
+    HAVE_RF = False
+
+# --- Paths / data ---
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_MODEL = BASE_DIR / "vosk-model-small-fr-0.22"  # ← dossier à la racine du projet
+MODEL_DIR = Path(os.getenv("VOSK_MODEL_DIR", str(DEFAULT_MODEL)))
+HEADLESS = os.getenv("HEADLESS", "1") == "1"
+MIC_DEVICE = os.getenv("MIC_DEVICE", None)
+VIDEOS = BASE_DIR / "videosASL"
+exts = {".mp4", ".webm", ".avi", ".mov"}
+if not MODEL_DIR.exists():
+    raise FileNotFoundError(f"Modèle introuvable: {MODEL_DIR}")
+VIDEOS.mkdir(exist_ok=True)
+
+# --- Normalisation + index ---
+TRANS = str.maketrans('', '', ' _-')
+
+def keyize(s: str) -> str:
+    s = unicodedata.normalize('NFD', s.lower().strip())
+    return ''.join(c for c in s if unicodedata.category(c) != 'Mn').translate(TRANS)
+
+def build_index():
+    idx = {}
+    for p in VIDEOS.rglob('*'):
+        if p.is_file() and p.suffix.lower() in exts:
+            idx[keyize(p.stem)] = str(p)
+    return idx
+
+INDEX = build_index(); VOCAB = sorted(INDEX); VOCAB_T = tuple(VOCAB)
+if not INDEX:
+    print(f"⚠️ Aucune vidéo dans {VIDEOS}")
+
+# --- Lecteur vidéo ---
+class LiveVideoPlayer:
+    def __init__(self, name="SignBridge"):
+         
+        self.cv2 = cv2
+        self.name, self._last, self._next, self._stop = name, None, None, threading.Event()
+        self._switch, self._lock = threading.Event(), threading.Lock()
+        self._t = threading.Thread(target=self._loop, daemon=True); self._t.start()
+    def play_now(self, path: str):
+        with self._lock:
+            self._next = path
+            self._switch.set()
+    def _loop(self):
+        cv2 = self.cv2
+        try:
+            cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
+        except Exception:
+            pass
+        cap = None
+        while not self._stop.is_set():
+            self._switch.wait(0.01)
+            if self._switch.is_set():
+                self._switch.clear()
+                with self._lock:
+                    path = self._next
+                if cap is not None:
+                    cap.release()
+                cap = cv2.VideoCapture(path)
+                if not cap.isOpened():
+                    print(f"⚠️ Impossible d'ouvrir: {path}")
+                    cap = None
+                else:
+                    try:
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+            if cap is not None:
+                ok, f = cap.read()
+                if ok:
+                    self._last = f
+                else:
+                    cap.release(); cap = None
+            if self._last is not None:
+                try:
+                    cv2.imshow(self.name, self._last)
+                except Exception:
+                    try:
+                        cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
+                    except Exception:
+                        pass
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                self._stop.set()
+        if cap is not None:
+            cap.release()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+    def close(self):
+        self._stop.set()
+        try:
+            self._t.join(0.5)
+        except Exception:
+            pass
+
+# --- STT ---
+print("⏳ Chargement Vosk…"); model = Model(str(MODEL_DIR))
+try:
+    default_sr = sd.query_devices(None, 'input')['default_samplerate']
+    SR = int(default_sr) if default_sr else 16000
+except Exception:
+    SR = 16000
+rec = KaldiRecognizer(model, default_sr, json.dumps(VOCAB)) if VOCAB else KaldiRecognizer(model, default_sr)
+try:
+    rec.SetWords(True)
+except Exception:
+    pass
+
+AUDIO_Q = queue.Queue(maxsize=8)
+
+def audio_cb(indata, frames, time_info, status):
+    if status:
+        print('⚠️', status)
+    try:
+        AUDIO_Q.put_nowait(bytes(indata))
+    except queue.Full:
+        try:
+            AUDIO_Q.get_nowait()
+        except Exception:
+            pass
+        try:
+            AUDIO_Q.put_nowait(bytes(indata))
+        except Exception:
+            pass
+
+COOLDOWN_NS, FUZZY, MINLEN = int(0.18 * 1e9), 0.82, 2
+last_token, last_time = '', {}
+
+@lru_cache(maxsize=512)
+def resolve_exact(tok: str):
+    return INDEX.get(tok)
+
+@lru_cache(maxsize=512)
+def resolve_fuzzy(tok: str):
+    if HAVE_RF and VOCAB:
+        m = rf.extractOne(tok, VOCAB_T, score_cutoff=FUZZY * 100)
+        return INDEX.get(m[0]) if m else None
+    ms = get_close_matches(tok, VOCAB, n=1, cutoff=FUZZY)
+    return INDEX.get(ms[0]) if ms else None
+
+def resolve(tok: str):
+    return resolve_exact(tok) or resolve_fuzzy(tok)
+
+
+def stt_live(player: LiveVideoPlayer, device=None):
+    print(f"🎤 LIVE @{sr}Hz (block=1536) RF={'on' if HAVE_RF else 'off'}")
+    with sd.RawInputStream(samplerate=sr, blocksize=1536, dtype='int16', channels=1, callback=audio_cb, device=device, latency='low'):
+        last_parse = 0
+        while True:
+            if rec.AcceptWaveform(AUDIO_Q.get()):
+                try:
+                    t = json.loads(rec.Result()).get('text', '')
+                    if t:
+                        print("\n✅ Final:", t)
+                except Exception:
+                    pass
+            else:
+                now = time.monotonic_ns()
+                if now - last_parse < 25_000_000:  # 25ms
+                    continue
+                last_parse = now
+                try:
+                    part = json.loads(rec.PartialResult()).get('partial', '')
+                except Exception:
+                    part = ''
+                if not part:
+                    continue
+                tok_raw = part.strip().split()[-1].lower()
+                if len(tok_raw) < MINLEN:
+                    continue
+                tok = keyize(tok_raw)
+                global last_token
+                if not tok or tok == last_token:
+                    continue
+                if now - last_time.get(tok, 0) < COOLDOWN_NS:
+                    continue
+                last_time[tok] = now
+                p = resolve(tok)
+                if p:
+                    print(f"\r▶️ {tok_raw} ", end='', flush=True)
+                    player.play_now(p)
+                last_token = tok
+
+
+if __name__ == '__main__':
+    print('🎬 Vocabulaire:', ', '.join(VOCAB) if VOCAB else '(vide)')
+    player = LiveVideoPlayer()
+    try:
+        stt_live(player)
+    except KeyboardInterrupt:
+        print('\n👋 Bye')
+    finally:
+        player.close()
+
