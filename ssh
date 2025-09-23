@@ -1,0 +1,13 @@
+# 1) Activer SSH (si pas déjà fait) :
+sudo raspi-config  # Interface Options → SSH → Enable
+
+# 2) Mises à jour de base
+sudo apt update && sudo apt full-upgrade -y
+
+# 3) Outils utiles
+sudo apt install -y openssh-server git python3-venv python3-pip build-essential
+
+# 4) Tweak I/O (optionnel, mais conseillé sur micro-SD)
+#    - activer zram pour swap rapide (plugin recommandé sur Raspberry Pi OS)
+sudo apt install -y zram-tools
+# /etc/default/zramswap : laisser la config par défaut (souvent OK)
