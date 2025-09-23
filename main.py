@@ -133,9 +133,12 @@ class LiveVideoPlayer:
 
 app = FastAPI()
 app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
+app.mount("/static", StaticFiles(directory=str(VIDEOS_DIR)), name="static")
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="site")
 CLIENTS = set()
 WS_LOOP = None
+LATEST = {"ts": 0.0, "text": "", "videos": []}
+LATEST_LOCK = threading.Lock()
 @app.on_event("startup")
 async def _startup():
     global WS_LOOP
@@ -193,8 +196,21 @@ def notify_play(path: str, text: Optional[str] = None):
     if text:
         asyncio.run_coroutine_threadsafe(_ws_broadcast({"type": "text", "text": text}), WS_LOOP)
 
+def set_current(text: str, video_paths: list[str]) -> None:
+    """Publie la dernière séquence pour /current (on n’envoie que les noms de fichiers)."""
+    with LATEST_LOCK:
+        LATEST["ts"] = time.time()
+        LATEST["text"] = text
+        LATEST["videos"] = [Path(p).name for p in video_paths]
+
+@app.get("/current")
+def current():
+    # La page web lit ceci périodiquement
+    with LATEST_LOCK:
+        return dict(LATEST)
+
 def start_web_server():
-    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning")
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
     server.run()
 
@@ -302,6 +318,7 @@ def stt_live(player: Optional[LiveVideoPlayer], device=None):
                             if path:
                                 print(f"\r▶️ {tok_raw} ", end="", flush=True)
                                 player.play_now(path)
+                                set_current(tok_raw, [path])
                         last_token = tok
 
 # ---------- Main ----------
@@ -310,6 +327,9 @@ if __name__ == "__main__":
         print("🎬 Vocabulaire:", ", ".join(VOCAB))
     else:
         print("ℹ️ Vocabulaire vide (ajoute des vidéos).")
+    # démarrer le serveur web (pour téléphone/PC)
+    web_t = threading.Thread(target=start_web_server, daemon=True)
+    web_t.start()
 
     player = LiveVideoPlayer("SignBridge")
     try:
