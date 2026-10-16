@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤟 SignBridge: Standalone Voice-to-Sign Assistive System
+# SignBridge: Standalone Voice-to-Sign Assistive System
 
 ### An autonomous embedded solution designed for educational accessibility, translating real-time speech into sign language gestures without external host dependencies.
 
@@ -13,7 +13,7 @@
 
 ---
 
-## 📌 Overview
+## Overview
 
 **SignBridge** is a dedicated, plug-and-play embedded assistive device designed to eliminate communication barriers in academic environments. Unlike traditional software solutions requiring teacher laptops or mobile device pairing, SignBridge operates as a completely **standalone system** powered by a single-board computer (Raspberry Pi).
 
@@ -21,7 +21,7 @@ Equipped with an independent microphone, it captures the instructor's vocal inpu
 
 ---
 
-## ⚙️ Key Technical Features
+## Key Technical Features
 
 - **Standalone & Headless Ready:** Operates independently without requiring teacher devices or smartphones.
 - **Audio Acquisition & Processing:** Plug-and-play microphone integration with noise resilience for classroom environments.
@@ -32,4 +32,16 @@ Equipped with an independent microphone, it captures the instructor's vocal inpu
 
 ---
 
-## 🏗️ System Architecture & Workflow
+##  System Architecture & Workflow
+[ Teacher Speech ] ──> ( Dedicated USB Mic )
+│
+▼
+[ Raspberry Pi 4 ]
+│
+├── Audio Parsing & Tokenization
+├── Semantic Mapping (mapping.json)
+└── Video Asset Retrieval (videosASL/)
+│
+▼
+[ Dynamic Visual Display ]
+( Classroom Screen / Monitor )
