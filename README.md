@@ -48,7 +48,7 @@ Equipped with an independent microphone, it captures the instructor's vocal inpu
 
 ---
 
-## 🚀 Setup & Deployment
+## Setup & Deployment
 
 ### 1. Hardware Requirements
 - **Raspberry Pi 3B+ / 4B** (running Raspberry Pi OS).
