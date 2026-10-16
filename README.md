@@ -45,3 +45,18 @@ Equipped with an independent microphone, it captures the instructor's vocal inpu
 ▼
 [ Dynamic Visual Display ]
 ( Classroom Screen / Monitor )
+
+---
+
+## 🚀 Setup & Deployment
+
+### 1. Hardware Requirements
+- **Raspberry Pi 3B+ / 4B** (running Raspberry Pi OS).
+- **USB Plug-and-Play Microphone** (Lapel/Wireless or Boundary mic).
+- **Display Output:** HDMI monitor or classroom projector.
+
+### 2. Installation
+Clone the repository onto your Raspberry Pi:
+```bash
+git clone [https://github.com/hajarAfaf/SignBridge.git](https://github.com/hajarAfaf/SignBridge.git)
+cd SignBridge
